@@ -1,0 +1,17 @@
+# Fichiers et dossiers à ignorer pour Git/GitHub
+
+# 1. Ignorer l'environnement virtuel complet (trop lourd)
+venv_ia_emotion/
+
+# 2. Ignorer le dossier du modèle d'IA (trop volumineux pour GitHub)
+final_emotion_model/
+
+# Fichiers binaires de modèle spécifiques qui peuvent apparaître
+*.pth
+*.safetensors
+pytorch_model.bin
+
+# Fichiers de cache Python
+__pycache__/
+*.pyc
+*.log
