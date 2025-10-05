@@ -1,106 +1,106 @@
-import os
-from fastapi import FastAPI
+import json
+import logging
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from transformers import pipeline
 
-# --- CONFIGURATION ---
-MODEL_PATH = "./final_emotion_model"
-# Assurez-vous que le modèle est bien chargé
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"Le dossier du modèle n'a pas été trouvé à l'emplacement : {MODEL_PATH}")
+# ----------------------------------------------------------------------
+# 1. Configuration du Logger
+# ----------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 1. Chargement du Modèle et du Tokenizer (effectué une seule fois au démarrage de l'API)
-print("Démarrage de l'API : Chargement du modèle en mémoire...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
+# ----------------------------------------------------------------------
+# 2. Chargement du Modèle (Correction pour Déploiement Cloud)
+# ----------------------------------------------------------------------
 
-emotion_pipeline = pipeline(
-    "sentiment-analysis", 
-    model=model, 
-    tokenizer=tokenizer
-)
-print("✅ Modèle d'analyse émotionnelle prêt.")
+# ID du modèle sur Hugging Face Hub (votre modèle)
+# Lorsque vous chargez un modèle directement par son ID Hub,
+# Transformers le télécharge automatiquement au premier appel (au démarrage).
+MODEL_ID = "caden7/final_emotion_model"
 
-# 2. Définition de l'Application FastAPI
+# Initialisation de l'App FastAPI
 app = FastAPI(
-    title="Emotion Inference API",
-    description="API pour l'analyse émotionnelle des textes en temps réel (BERT Multilingue)."
+    title="Emotion Detection API",
+    description="API to predict emotions (Happy, Sad, Angry, etc.) from text using a pre-trained Hugging Face model.",
+    version="1.0.0"
 )
 
-# 3. Définition du Schéma de Données pour la Requête
-class TextRequest(BaseModel):
+# Variable pour stocker le pipeline (sera initialisé au premier appel pour économiser de la RAM)
+# NOTE: Nous allons initialiser le pipeline directement pour capturer les erreurs de téléchargement
+# le plus tôt possible lors du démarrage de Render.
+emotion_pipeline = None
+
+def load_model():
+    """Charge le pipeline du modèle depuis Hugging Face Hub."""
+    global emotion_pipeline
+    try:
+        logger.info(f"Attempting to load model from Hugging Face Hub: {MODEL_ID}...")
+        
+        # Le pipeline télécharge automatiquement le modèle s'il n'est pas en cache.
+        emotion_pipeline = pipeline(
+            "text-classification",
+            model=MODEL_ID,
+            tokenizer=MODEL_ID,
+            top_k=None # Permet d'obtenir tous les scores d'émotion
+        )
+        logger.info("Model loaded successfully from Hugging Face Hub.")
+    except Exception as e:
+        logger.error(f"FATAL ERROR: Could not load model from Hugging Face Hub. Reason: {e}")
+        # Lancer une exception arrêtera le service si le chargement échoue
+        raise RuntimeError(f"Model loading failed: {e}")
+
+# Charger le modèle au démarrage de l'application
+load_model()
+
+
+# ----------------------------------------------------------------------
+# 3. Schéma de Requête
+# ----------------------------------------------------------------------
+class EmotionRequest(BaseModel):
+    """Définit le corps de la requête API."""
     text: str
 
-# 4. Définition du Endpoint de Prédiction
+
+# ----------------------------------------------------------------------
+# 4. Route Principale
+# ----------------------------------------------------------------------
 @app.post("/predict_emotion")
-def predict_emotion(request: TextRequest):
+async def get_emotion_prediction(request: EmotionRequest):
     """
-    Analyse le texte fourni et retourne l'émotion prédite et le score de confiance.
+    Accepte une chaîne de texte et retourne les probabilités d'émotion.
     """
-    
-    # 5. Prédiction : DEMANDE DES 5 MEILLEURS RÉSULTATS
-    # Cela permet de vérifier l'hésitation du modèle
-    result_top_k = emotion_pipeline(request.text, top_k=5)
-    
-    # Affiche les 5 meilleurs résultats pour le débogage dans le terminal Uvicorn
-    print("\n--- Meilleurs résultats du Modèle ---")
-    print(result_top_k)
-    print("-----------------------------------\n")
+    if not emotion_pipeline:
+        # Mesure de sécurité si le chargement initial a échoué (ne devrait pas arriver avec load_model())
+        raise HTTPException(status_code=503, detail="Model is not loaded or ready.")
 
-    # 6. LOGIQUE DE CORRECTION POUR LE "NEUTRE" FAIBLE
-    
-    emotion_data = result_top_k[0] # Le résultat le plus confiant (souvent 'neutre')
-    
-    # Si le résultat principal est 'neutre', on regarde si une autre émotion est proche
-    if emotion_data['label'] == 'neutre' and len(result_top_k) > 1:
-        
-        # Récupère l'émotion non-neutre la plus probable (le deuxième meilleur résultat)
-        best_non_neutral = result_top_k[1]
-        
-        # Seuil d'hésitation : si l'émotion non-neutre est à moins de 5 points de pourcentage (0.05) du neutre
-        NEUTRAL_TOLERANCE = 0.05 
-        
-        if (emotion_data['score'] - best_non_neutral['score']) < NEUTRAL_TOLERANCE:
-            # Si le modèle hésite, on choisit l'émotion non-neutre pour l'action UX
-            print(f"Correction: Le modèle hésitait (Neutre {emotion_data['score']:.2f} vs {best_non_neutral['label']} {best_non_neutral['score']:.2f}). Choix de {best_non_neutral['label']}.")
-            
-            emotion_label = best_non_neutral['label']
-            score = best_non_neutral['score']
-        else:
-            # Si 'neutre' est beaucoup plus confiant (écart > 0.05), on le garde.
-            emotion_label = emotion_data['label']
-            score = emotion_data['score']
-    
-    else:
-        # Si la meilleure prédiction n'est pas 'neutre', on la garde
-        emotion_label = emotion_data['label']
-        score = emotion_data['score']
-        
-    # --- LOGIQUE D'ACTION UX DÉPENDANT DE L'ÉMOTION FINALE ---
-    ux_action = "Aucune action spécifique n'est suggérée pour cette émotion."
-    
-    # 🚨 RÈGLE 1 : GESTION DES ÉMOTIONS DE DÉTRESSE (Éthique et Sécurité)
-    if emotion_label in ['tristesse', 'chagrin', 'remords', 'peur']: 
-        ux_action = "Parle de ta situation à une personne de confiance pour te conseiller et t'aider."
-    
-    # RÈGLE 2 : GESTION DES ÉMOTIONS NÉGATIVES FORTES (Frustration / Colère)
-    elif emotion_label in ['colère', 'ennui', 'déception', 'désapprobation']:
-        ux_action = "Je vois que tu n'es pas de bonne humeur. Je te suggère de prendre une pause d'au moins 30 minutes pour te relaxer et revenir, et surtout n'oublie pas de sauvegarder ton travail en cours."
-    
-    # RÈGLE 3 : GESTION DES ÉMOTIONS POSITIVES (Encouragement)
-    elif emotion_label in ['joie', 'excitation', 'amour', 'fierté', 'gratitude', 'optimisme', 'admiration']:
-        ux_action = "Félicitation pour ta bonne humeur. Continue dans cet état d'esprit jusqu'à la fin."
-    
-    # FIN DE LA LOGIQUE D'ACTION UX
-    
-    return {
-        "text": request.text,
-        "emotion": emotion_label,
-        "score": f"{score:.4f}",
-        "ux_action_sugeree": ux_action
-    }
+    try:
+        text = request.text
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Text cannot be empty.")
 
-# 7. Endpoint de Bienvenue
+        logger.info(f"Received text for prediction: '{text[:50]}...'")
+
+        # Exécuter l'inférence
+        results = emotion_pipeline(text)
+        
+        # L'API retourne une liste de listes, nous prenons le premier élément [0]
+        # et le convertissons en un dictionnaire pour faciliter la lecture.
+        formatted_results = {
+            item['label']: item['score'] for item in results[0]
+        }
+
+        logger.info("Prediction successful.")
+        return {"emotions": formatted_results}
+
+    except Exception as e:
+        logger.error(f"Prediction failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error during prediction: {e}")
+
+# ----------------------------------------------------------------------
+# 5. Route de Santé (Health Check)
+# ----------------------------------------------------------------------
 @app.get("/")
-def home():
-    return {"message": "Bienvenue à l'API d'Inférence Émotionnelle. Utilisez l'endpoint /predict_emotion."}
+def read_root():
+    """Simple route pour vérifier que l'API est en cours d'exécution."""
+    return {"status": "ok", "message": "Emotion Detection API is running and model is loaded."}
