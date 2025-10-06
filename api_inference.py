@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 # ID du modèle sur Hugging Face Hub (votre modèle)
 # Lorsque vous chargez un modèle directement par son ID Hub,
 # Transformers le télécharge automatiquement au premier appel (au démarrage).
-MODEL_ID = "caden7/final_emotion_model"
-
+MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
 # Initialisation de l'App FastAPI
 app = FastAPI(
     title="Emotion Detection API",
